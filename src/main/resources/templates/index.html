@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>Electro Bus Route - Sahiwal</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        #map {
+            height: 100vh;
+            width: 100vw;
+        }
+        .control-panel {
+            position: absolute;
+            top: 10px;
+            left: 50px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        .control-panel h1 {
+            margin: 0 0 10px 0;
+            font-size: 1.5em;
+        }
+        .control-panel select, .control-panel button {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+        .control-panel button {
+            background-color: #28a745;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        .control-panel button:hover {
+            background-color: #218838;
+        }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="control-panel">
+    <h1>Electro Bus Route</h1>
+    <label for="start-stop">Start:</label>
+    <select id="start-stop"></select>
+    <label for="end-stop">End:</label>
+    <select id="end-stop"></select>
+    <button id="find-route-btn">Find Route</button>
+</div>
+
+<script>
+    const map = L.map('map').setView([30.67, 73.11], 13);
+
+    L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png', {
+        maxZoom: 20,
+        attribution: '&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    const startStopSelect = document.getElementById('start-stop');
+    const endStopSelect = document.getElementById('end-stop');
+    const findRouteBtn = document.getElementById('find-route-btn');
+
+    const stopsMap = new Map();
+    let shortestPathLayer = L.layerGroup().addTo(map);
+
+    // Fetch bus stops and populate dropdowns and local map
+    fetch('/api/stops')
+        .then(response => response.json())
+        .then(stops => {
+            stops.forEach(stop => {
+                stopsMap.set(stop.id, stop); // Store stop data for easy access
+
+                L.marker([stop.latitude, stop.longitude])
+                    .addTo(map)
+                    .bindPopup(`<b>${stop.name}</b><br>ID: ${stop.id}`);
+
+                const option1 = new Option(`${stop.name} (${stop.id})`, stop.id);
+                const option2 = new Option(`${stop.name} (${stop.id})`, stop.id);
+                startStopSelect.add(option1);
+                endStopSelect.add(option2);
+            });
+        })
+        .catch(error => console.error('Error fetching bus stops:', error));
+
+    // Fetch all routes and draw them as straight lines
+    fetch('/api/routes')
+        .then(response => response.json())
+        .then(routes => {
+            routes.forEach(route => {
+                const latlngs = [
+                    [route.fromStop.latitude, route.fromStop.longitude],
+                    [route.toStop.latitude, route.toStop.longitude]
+                ];
+                L.polyline(latlngs, { color: 'gray', weight: 2, opacity: 0.5, dashArray: '5, 5' }).addTo(map);
+            });
+        })
+        .catch(error => console.error('Error fetching routes:', error));
+
+    // Find Route Button Logic
+    findRouteBtn.addEventListener('click', async () => {
+        const startStopId = startStopSelect.value;
+        const endStopId = endStopSelect.value;
+
+        if (startStopId === endStopId) {
+            alert("Start and end stops cannot be the same.");
+            return;
+        }
+
+        // Clear previous shortest path
+        shortestPathLayer.clearLayers();
+        findRouteBtn.disabled = true;
+        findRouteBtn.textContent = 'Finding...';
+
+        try {
+            // 1. Get the sequence of stops from our backend
+            const response = await fetch(`/api/shortest-path?startStopId=${startStopId}&endStopId=${endStopId}`);
+            const stopSequence = await response.json();
+
+            if (stopSequence.length < 2) {
+                alert("No path found between these stops.");
+                return;
+            }
+
+            // 2. For each segment in the sequence, get the on-road path from OSRM
+            for (let i = 0; i < stopSequence.length - 1; i++) {
+                const fromStop = stopSequence[i];
+                const toStop = stopSequence[i + 1];
+
+                const fromCoords = `${fromStop.longitude},${fromStop.latitude}`;
+                const toCoords = `${toStop.longitude},${toStop.latitude}`;
+                
+                // OSRM API URL
+                const osrmUrl = `http://router.project-osrm.org/route/v1/driving/${fromCoords};${toCoords}?overview=full&geometries=geojson`;
+
+                const routeResponse = await fetch(osrmUrl);
+                const routeData = await routeResponse.json();
+
+                if (routeData.routes && routeData.routes.length > 0) {
+                    const routeGeometry = routeData.routes[0].geometry;
+                    // 3. Draw the on-road path segment on the map
+                    L.geoJSON(routeGeometry, {
+                        style: {
+                            color: 'red',
+                            weight: 5,
+                            opacity: 0.8
+                        }
+                    }).addTo(shortestPathLayer);
+                }
+            }
+        } catch (error) {
+            console.error('Error finding or drawing the route:', error);
+            alert('Could not retrieve the on-road route. Please try again.');
+        } finally {
+            findRouteBtn.disabled = false;
+            findRouteBtn.textContent = 'Find Route';
+        }
+    });
+</script>
+
+</body>
+</html>
